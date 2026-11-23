@@ -6,7 +6,9 @@ import asyncio, ctypes, hashlib, hmac, io, json, os, secrets, sys, threading, ti
 from concurrent.futures import ThreadPoolExecutor
 from aiohttp import web
 
+VERSION = "1.11"
 PORT = 8777
+UPDATE_URL = "https://raw.githubusercontent.com/lee09930239-dotcom/phone-remote/HEAD/phone_remote.py"
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
 CFG_PATH = os.path.join(BASE, "phone_remote_config.json")
 
@@ -219,7 +221,16 @@ async def ws_handler(req):
                     asyncio.ensure_future(_chk())
             elif t == "scroll": mouse("scroll", d=m.get("d", 0))
             elif t == "key": key_combo(str(m.get("k", "")))
-            elif t == "ping": print("收到按鈕測試訊號 ✔")
+            elif t == "ping":
+                print("收到按鈕測試訊號 ✔"); await ws.send_str(json.dumps({"t": "ver", "v": VERSION}))
+            elif t == "update":
+                try:
+                    v = await loop.run_in_executor(None, do_update)
+                    print("手機要求更新 → 已下載 v%s，重新啟動" % v)
+                    await ws.send_str(json.dumps({"t": "upd", "ok": True, "v": v}))
+                    loop.call_later(1.0, os._exit, 3)
+                except Exception as e:
+                    await ws.send_str(json.dumps({"t": "upd", "ok": False, "msg": str(e)[:200]}))
             elif t == "text": type_text(str(m.get("s", ""))[:2000])
         except Exception as e:
             print("指令錯誤:", e)
@@ -273,7 +284,7 @@ body.typing #hint{display:none!important}
  <div id="more">
   <button data-k="f5">F5 放映</button><button data-k="esc">Esc</button><button data-k="f">全螢幕f</button><button data-k="volmute">🔇</button>
   <button data-k="prev">⏮</button><button data-k="next">⏭</button><button data-k="space">空白</button><button data-k="alt+tab">切換</button>
-  <button data-k="left">◀</button><button data-k="right">▶</button><button id="zm">🔍放大</button><button id="ql">畫質:中</button><button id="out">登出</button>
+  <button data-k="left">◀</button><button data-k="right">▶</button><button id="zm">🔍放大</button><button id="ql">畫質:中</button><button id="out">登出</button><button id="up" style="grid-column:span 4">⟳ 更新到最新版</button>
  </div>
 </div>
 <div id="kb"><input id="txt" placeholder="直接打字，會即時送到電腦" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send"><button data-k="enter">Enter</button><button data-k="backspace">⌫</button><button id="kbx">完成</button></div>
@@ -286,10 +297,10 @@ function send(o){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
 function req(){ send({t:'frame',q:QL[qi][1],w:QL[qi][2]}); }
 function connect(){
   ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws'); ws.binaryType='blob';
-  ws.onopen=()=>{st.textContent='已連線'; send({t:'ping'}); req();};
+  ws.onopen=()=>{ let u=null; try{u=sessionStorage.getItem('upd')}catch(_){} if(u){ try{sessionStorage.removeItem('upd')}catch(_){} location.reload(); return; } st.textContent='已連線'; send({t:'ping'}); req();};
   ws.onclose=()=>{st.textContent='斷線，重新連線中…'; setTimeout(connect,2000);};
   ws.onmessage=e=>{
-    if(typeof e.data==='string'){const m=JSON.parse(e.data); if(m.t==='err'){st.textContent=m.msg; req();} if(m.t==='caret'){ const h=$('hint'); h.style.display='block'; clearTimeout(h._t); h._t=setTimeout(()=>h.style.display='',4000); } if(m.t==='bat'){batTxt=(m.ac?'🔌':'🔋')+m.p+'%'+(!m.ac&&m.p<=20?' 電量低':'');} return;}
+    if(typeof e.data==='string'){const m=JSON.parse(e.data); if(m.t==='err'){st.textContent=m.msg; req();} if(m.t==='caret'){ const h=$('hint'); h.style.display='block'; clearTimeout(h._t); h._t=setTimeout(()=>h.style.display='',4000); } if(m.t==='ver'){ $('up').textContent='⟳ 更新到最新版（目前 v'+m.v+'）'; } if(m.t==='upd'){ if(m.ok){ st.textContent='已下載 v'+m.v+'，重新啟動中…'; try{sessionStorage.setItem('upd','1')}catch(_){} } else { $('up').textContent='更新失敗：'+m.msg; } } if(m.t==='bat'){batTxt=(m.ac?'🔌':'🔋')+m.p+'%'+(!m.ac&&m.p<=20?' 電量低':'');} return;}
     const u=URL.createObjectURL(e.data); img.onload=()=>{ if(lastUrl) URL.revokeObjectURL(lastUrl); lastUrl=u; frames++; setTimeout(req,30); }; img.src=u;
   };
 }
@@ -348,6 +359,7 @@ $('lb').onclick=()=>setBtn(false); $('rb').onclick=()=>setBtn(!rightNext);   // 
 function ripple(x,y,r){ const d=document.createElement('div'); d.className='tap'+(r?' r':''); d.style.left=x+'px'; d.style.top=y+'px'; document.body.appendChild(d); setTimeout(()=>d.remove(),450); if(navigator.vibrate) navigator.vibrate(15); }
 $('zm').onclick=()=>{ zoom=!zoom; wrap.classList.toggle('zoom',zoom); $('zm').classList.toggle('on',zoom); $('more').classList.remove('show'); };
 $('ql').onclick=()=>{ qi=(qi+1)%3; $('ql').textContent='畫質:'+QL[qi][0]; };
+$('up').onclick=()=>{ $('up').textContent='更新中，約 10 秒…'; send({t:'update'}); };
 $('out').onclick=()=>{ location.href='/logout'; };
 connect();
 </script></body></html>"""
@@ -419,20 +431,47 @@ def tunnel_loop():
                 if CFG.get("notify", "outlook") == "outlook": threading.Thread(target=notify_outlook, args=(last,), daemon=True).start()
         print("外網通道中斷，10 秒後重連"); time.sleep(10)
 
-def main():
-    if IS_WIN:  # 程式開著時：不睡眠、不關螢幕（減少自動鎖定）
-        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)
+def do_update():
+    """從 GitHub 下載最新版蓋掉自己（先檢查內容完整、語法正確，舊版留 .bak）"""
+    import urllib.request
+    req = urllib.request.Request(UPDATE_URL + "?t=%d" % time.time(), headers={"Cache-Control": "no-cache"})
+    data = urllib.request.urlopen(req, timeout=30).read()
+    if len(data) < 10000 or b"def main" not in data: raise ValueError("下載內容不完整")
+    compile(data, "phone_remote.py", "exec")
+    me = os.path.abspath(__file__)
+    with open(me, "rb") as f: old = f.read()
+    with open(me + ".bak", "wb") as f: f.write(old)
+    with open(me, "wb") as f: f.write(data)
+    m = re.search(rb'VERSION = "([^"]+)"', data)
+    return m.group(1).decode() if m else "?"
+
+def child_main():
+    """網頁伺服器本體（更新時只重開這個，外網通道不動 → 手機網址不變）"""
+    if IS_WIN: ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)
     app = web.Application()
     app.add_routes([web.get("/", index), web.post("/login", login), web.get("/logout", logout), web.get("/manifest.json", manifest), web.get("/ws", ws_handler)])
+    for i in range(20):   # 等舊的伺服器放開 port
+        try:
+            web.run_app(app, host="127.0.0.1", port=PORT, print=None); return
+        except OSError:
+            time.sleep(0.5)
+
+def main():
+    if "--child" in sys.argv: return child_main()
+    if IS_WIN: ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)
     print("=" * 50)
-    print(" 手機遙控 PhoneRemote 已啟動（關掉這個視窗就停止）")
+    print(" 手機遙控 PhoneRemote v%s 已啟動（關掉這個視窗就停止）" % VERSION)
     print(" 本機測試網址： http://127.0.0.1:%d" % PORT)
     print(" 手機網址：等一下會顯示 https://....trycloudflare.com（也會寄到你的 Outlook）")
     print(" PIN：%s   （要改 PIN：編輯 %s）" % (PIN, CFG_PATH))
     print("=" * 50)
     threading.Thread(target=tunnel_loop, daemon=True).start()
     if IS_WIN: threading.Thread(target=battery_guard, daemon=True).start()
-    web.run_app(app, host="127.0.0.1", port=PORT, print=None)
+    while True:
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--child"])
+        if r.returncode == 3:
+            print("已更新，重新啟動伺服器（手機網址不變）…"); continue
+        print("伺服器停止（代碼 %s），5 秒後重開" % r.returncode); time.sleep(5)
 
 if __name__ == "__main__":
     main()
