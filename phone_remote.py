@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""手機遙控筆電 PhoneRemote v1.9 (2026-11-23)
+"""手機遙控筆電 PhoneRemote v1.10 (2026-11-23)
 筆電端：擷取畫面 -> JPEG 串流到手機瀏覽器；手機點擊/打字/媒體鍵 -> 注入 Windows。
 只聽 127.0.0.1，外網靠 Tailscale serve / funnel 轉進來（自動 HTTPS）。"""
 import asyncio, ctypes, hashlib, hmac, io, json, os, secrets, sys, threading, time
@@ -214,7 +214,9 @@ async def ws_handler(req):
             elif t in ("click", "dbl", "down", "move", "up"):
                 mouse(t, m.get("x"), m.get("y"), m.get("b", "left"))
                 if t == "click" and m.get("b", "left") == "left":
-                    if await loop.run_in_executor(None, caret_active): await ws.send_str('{"t":"caret"}')
+                    async def _chk():
+                        if await loop.run_in_executor(None, caret_active) and not ws.closed: await ws.send_str('{"t":"caret"}')
+                    asyncio.ensure_future(_chk())
             elif t == "scroll": mouse("scroll", d=m.get("d", 0))
             elif t == "key": key_combo(str(m.get("k", "")))
             elif t == "ping": print("收到按鈕測試訊號 ✔")
@@ -250,7 +252,9 @@ html,body{margin:0;height:100%;background:#000;color:#eee;font-family:sans-serif
 #more{display:none;position:absolute;right:62px;top:50%;transform:translateY(-50%);background:#1b1b1bee;padding:8px;border-radius:12px;
  grid-template-columns:repeat(4,auto);gap:6px}
 #more.show{display:grid}#more button{width:auto;min-width:60px;font-size:16px;padding:0 8px}
-#more button.on{background:#2b7cff}
+#more button.on,#bar button.on{background:#2b7cff}#bar #lb,#bar #rb{font-size:15px}
+.tap{position:fixed;width:36px;height:36px;margin:-18px 0 0 -18px;border-radius:50%;border:3px solid #ff4;pointer-events:none;z-index:7;animation:tp .4s ease-out forwards}
+.tap.r{border-color:#f4f}@keyframes tp{from{transform:scale(.4);opacity:1}to{transform:scale(1.3);opacity:0}}
 #st{position:absolute;top:4px;left:6px;font-size:12px;color:#8f8;background:#0008;padding:2px 6px;border-radius:4px;pointer-events:none}
 #kb{display:none;position:fixed;left:0;right:0;top:0;height:52px;background:#222;padding:8px;gap:6px;z-index:9}
 body.typing #app{transform:none;width:100vw;top:52px;height:calc(var(--vh,100dvh) - 52px)}
@@ -264,12 +268,12 @@ body.typing #hint{display:none!important}
  <div id="wrap"><img id="scr" alt=""></div><div id="st">連線中…</div>
  <div id="bar">
   <button id="kbBtn">⌨️</button><button data-k="playpause">⏯</button><button data-k="voldown">🔉</button>
-  <button data-k="volup">🔊</button><button data-k="left">◀</button><button data-k="right">▶</button><button id="mo">⋯</button>
+  <button data-k="volup">🔊</button><button id="lb" class="on">左鍵</button><button id="rb">右鍵</button><button id="mo">⋯</button>
  </div>
  <div id="more">
   <button data-k="f5">F5 放映</button><button data-k="esc">Esc</button><button data-k="f">全螢幕f</button><button data-k="volmute">🔇</button>
   <button data-k="prev">⏮</button><button data-k="next">⏭</button><button data-k="space">空白</button><button data-k="alt+tab">切換</button>
-  <button id="rc">右鍵</button><button id="zm">🔍放大</button><button id="ql">畫質:中</button><button id="out">登出</button>
+  <button data-k="left">◀</button><button data-k="right">▶</button><button id="zm">🔍放大</button><button id="ql">畫質:中</button><button id="out">登出</button>
  </div>
 </div>
 <div id="kb"><input id="txt" placeholder="直接打字，會即時送到電腦" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send"><button data-k="enter">Enter</button><button data-k="backspace">⌫</button><button id="kbx">完成</button></div>
@@ -298,7 +302,6 @@ let s=null, lp=null, drag=false, lastMove=0, scrollY=null;
 img.addEventListener('touchstart',e=>{
   if(e.touches.length===2){ clearTimeout(lp); s=null; scrollY=(along(e.touches[0])+along(e.touches[1]))/2; if(!zoom) e.preventDefault(); return; }
   const t=e.touches[0]; s={x:t.clientX,y:t.clientY,p:pos(t),long:false}; drag=false;
-  lp=setTimeout(()=>{ if(s&&!drag){ s.long=true; send({t:'click',...s.p,b:'right'}); if(navigator.vibrate) navigator.vibrate(30);} },600);
   if(!zoom) e.preventDefault();
 },{passive:false});
 img.addEventListener('touchmove',e=>{
@@ -306,7 +309,7 @@ img.addEventListener('touchmove',e=>{
     const y=(along(e.touches[0])+along(e.touches[1]))/2, dy=y-scrollY;
     if(Math.abs(dy)>25){ send({t:'scroll',d:dy>0?1:-1}); scrollY=y; } return; }
   if(!s) return; const t=e.touches[0];
-  if(Math.hypot(t.clientX-s.x,t.clientY-s.y)>12){ clearTimeout(lp);
+  if(Math.hypot(t.clientX-s.x,t.clientY-s.y)>22){ clearTimeout(lp);
     if(zoom){ s=null; return; }
     if(!drag){ drag=true; send({t:'down',...s.p}); } }
   if(drag){ e.preventDefault(); const n=Date.now(); if(n-lastMove>40){ send({t:'move',...pos(t)}); lastMove=n; } }
@@ -315,7 +318,7 @@ img.addEventListener('touchend',e=>{
   clearTimeout(lp); if(e.touches.length===0) scrollY=null;
   if(!s) return; const ch=e.changedTouches[0];
   if(drag){ send({t:'up',...pos(ch)}); }
-  else if(!s.long){ send({t:'click',...s.p,b:rightNext?'right':'left'}); if(rightNext){rightNext=false;$('rc').classList.remove('on');} }
+  else { send({t:'click',...s.p,b:rightNext?'right':'left'}); ripple(s.x,s.y,rightNext); if(rightNext) setBtn(false); }
   s=null; drag=false; if(!zoom) e.preventDefault();
 },{passive:false});
 img.addEventListener('click',e=>{ if(!('ontouchstart' in window)) send({t:'click',...pos(e),b:'left'}); });
@@ -340,7 +343,9 @@ txt.addEventListener('keydown',e=>{
 });
 document.querySelectorAll('#kb button').forEach(b=>b.addEventListener('touchstart',e=>{ e.preventDefault(); b.click(); },{passive:false}));  // 按鈕不搶走輸入框焦點
 txt.addEventListener('blur',()=>setTimeout(()=>{ if(document.activeElement!==txt) closeKb(); },300));
-$('rc').onclick=()=>{ rightNext=!rightNext; $('rc').classList.toggle('on',rightNext); $('more').classList.remove('show'); };
+function setBtn(r){ rightNext=r; $('rb').classList.toggle('on',r); $('lb').classList.toggle('on',!r); }
+$('lb').onclick=()=>setBtn(false); $('rb').onclick=()=>setBtn(!rightNext);   // 右鍵：點一次後自動回到左鍵
+function ripple(x,y,r){ const d=document.createElement('div'); d.className='tap'+(r?' r':''); d.style.left=x+'px'; d.style.top=y+'px'; document.body.appendChild(d); setTimeout(()=>d.remove(),450); if(navigator.vibrate) navigator.vibrate(15); }
 $('zm').onclick=()=>{ zoom=!zoom; wrap.classList.toggle('zoom',zoom); $('zm').classList.toggle('on',zoom); $('more').classList.remove('show'); };
 $('ql').onclick=()=>{ qi=(qi+1)%3; $('ql').textContent='畫質:'+QL[qi][0]; };
 $('out').onclick=()=>{ location.href='/logout'; };
