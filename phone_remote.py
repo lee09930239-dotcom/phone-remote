@@ -6,7 +6,7 @@ import asyncio, ctypes, hashlib, hmac, io, json, os, secrets, sys, threading, ti
 from concurrent.futures import ThreadPoolExecutor
 from aiohttp import web
 
-VERSION = "1.11"
+VERSION = "1.12"
 PORT = 8777
 UPDATE_URL = "https://raw.githubusercontent.com/lee09930239-dotcom/phone-remote/HEAD/phone_remote.py"
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
@@ -309,7 +309,7 @@ setInterval(()=>{ if(ws&&ws.readyState===1) st.textContent=batTxt+'  '+frames+' 
 function pos(t){const r=img.getBoundingClientRect();
   return rot()?{x:(t.clientY-r.top)/r.height, y:(r.right-t.clientX)/r.width}:{x:(t.clientX-r.left)/r.width, y:(t.clientY-r.top)/r.height};}
 const along=t=>rot()?-t.clientX:t.clientY;   // 畫面上的「上下」方向
-let s=null, lp=null, drag=false, lastMove=0, scrollY=null;
+let lastTap=null, s=null, lp=null, drag=false, lastMove=0, scrollY=null;
 img.addEventListener('touchstart',e=>{
   if(e.touches.length===2){ clearTimeout(lp); s=null; scrollY=(along(e.touches[0])+along(e.touches[1]))/2; if(!zoom) e.preventDefault(); return; }
   const t=e.touches[0]; s={x:t.clientX,y:t.clientY,p:pos(t),long:false}; drag=false;
@@ -329,7 +329,11 @@ img.addEventListener('touchend',e=>{
   clearTimeout(lp); if(e.touches.length===0) scrollY=null;
   if(!s) return; const ch=e.changedTouches[0];
   if(drag){ send({t:'up',...pos(ch)}); }
-  else { send({t:'click',...s.p,b:rightNext?'right':'left'}); ripple(s.x,s.y,rightNext); if(rightNext) setBtn(false); }
+  else {
+    const now=Date.now(), dt=lastTap?now-lastTap.t:1e9, dd=lastTap?Math.hypot(s.x-lastTap.x,s.y-lastTap.y):1e9;
+    if(!rightNext && dt<500 && dd<40){ send({t:'dbl',...lastTap.p}); lastTap=null; ripple(s.x,s.y,false); ripple(s.x,s.y,false); }  // 連點兩下＝雙擊（開檔案）
+    else { send({t:'click',...s.p,b:rightNext?'right':'left'}); ripple(s.x,s.y,rightNext); lastTap=rightNext?null:{t:now,x:s.x,y:s.y,p:s.p}; if(rightNext) setBtn(false); }
+  }
   s=null; drag=false; if(!zoom) e.preventDefault();
 },{passive:false});
 img.addEventListener('click',e=>{ if(!('ontouchstart' in window)) send({t:'click',...pos(e),b:'left'}); });
