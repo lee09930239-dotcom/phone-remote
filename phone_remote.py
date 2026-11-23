@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""手機遙控筆電 PhoneRemote v1.10 (2026-11-23)
+"""手機遙控筆電 PhoneRemote v1.13 (2026-11-24)
 筆電端：擷取畫面 -> JPEG 串流到手機瀏覽器；手機點擊/打字/媒體鍵 -> 注入 Windows。
 只聽 127.0.0.1，外網靠 Tailscale serve / funnel 轉進來（自動 HTTPS）。"""
 import asyncio, ctypes, hashlib, hmac, io, json, os, secrets, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
 from aiohttp import web
 
-VERSION = "1.12"
+VERSION = "1.13"
 PORT = 8777
 UPDATE_URL = "https://raw.githubusercontent.com/lee09930239-dotcom/phone-remote/HEAD/phone_remote.py"
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
@@ -20,7 +20,7 @@ def load_cfg():
         except Exception: cfg = {}
     changed = False
     if not str(cfg.get("pin", "")).strip():
-        cfg["pin"] = "".join(secrets.choice("0123456789") for _ in range(6)); changed = True
+        cfg["pin"] = "".join(secrets.choice("0123456789") for _ in range(8)); changed = True
     if not cfg.get("secret"):
         cfg["secret"] = secrets.token_hex(16); changed = True
     # PIN 改了就讓舊登入失效
@@ -34,7 +34,7 @@ def load_cfg():
 CFG = load_cfg()
 PIN = str(CFG["pin"]).strip()
 TOKEN = hmac.new(CFG["secret"].encode(), b"phone-remote-ok", "sha256").hexdigest()
-FAIL = {"n": 0, "until": 0.0}
+FAIL = {"n": 0, "until": 0.0, "locks": 0}   # 連續被鎖幾次（每次鎖更久）
 
 # ---------------- Windows 輸入 ----------------
 IS_WIN = os.name == "nt"
@@ -173,17 +173,28 @@ async def index(req):
     return web.Response(text=APP_HTML if authed(req) else LOGIN_HTML.replace("{{MSG}}", ""), content_type="text/html")
 
 async def login(req):
+    # 先讀完表單，之後「檢查鎖定→比對→記錄」中間沒有 await，同時送一大堆猜測也會被同一個鎖擋下
+    try: pin = str((await req.post()).get("pin", "")).strip()[:64]
+    except Exception: pin = ""
     now = time.time()
     if now < FAIL["until"]:
         return web.Response(text=LOGIN_HTML.replace("{{MSG}}", "錯誤太多次，請 %d 分鐘後再試" % (int(FAIL["until"] - now) // 60 + 1)), content_type="text/html")
-    pin = str((await req.post()).get("pin", "")).strip()
-    if hmac.compare_digest(pin.encode(), PIN.encode()):
-        FAIL["n"] = 0
+    if pin and hmac.compare_digest(pin.encode(), PIN.encode()):
+        FAIL["n"] = 0; FAIL["locks"] = 0
+        ua = req.headers.get("User-Agent", "")[:120]
+        print("✅ 有裝置登入成功：%s  %s" % (time.strftime("%m/%d %H:%M"), ua))
+        if CFG.get("notify", "outlook") == "outlook" and CFG.get("login_notify", True):
+            threading.Thread(target=notify_login, args=(ua,), daemon=True).start()
         r = web.HTTPFound("/")
-        r.set_cookie("pr_tok", TOKEN, max_age=30 * 86400, httponly=True, samesite="Strict")
+        r.set_cookie("pr_tok", TOKEN, max_age=30 * 86400, httponly=True, samesite="Strict", secure=req.headers.get("X-Forwarded-Proto") == "https")
         raise r
     FAIL["n"] += 1
-    if FAIL["n"] >= 5: FAIL["n"] = 0; FAIL["until"] = now + 300
+    print("⚠️ PIN 錯誤（第 %d 次）" % FAIL["n"])
+    if FAIL["n"] >= 5:
+        FAIL["n"] = 0; FAIL["locks"] += 1
+        mins = min(60, 5 * 2 ** (FAIL["locks"] - 1))   # 5 → 10 → 20 → 40 → 60 分
+        FAIL["until"] = now + mins * 60
+        print("🔒 PIN 錯太多次，鎖定 %d 分鐘。不是你自己打錯的話，建議關掉黑色視窗（網址會換掉）" % mins)
     await asyncio.sleep(1)
     return web.Response(text=LOGIN_HTML.replace("{{MSG}}", "PIN 錯誤"), content_type="text/html")
 
@@ -193,6 +204,11 @@ async def manifest(req):
 
 async def logout(req):
     r = web.HTTPFound("/"); r.del_cookie("pr_tok"); raise r
+
+def logout_all():
+    """換一組 secret：所有手機的登入都失效（PIN 不變），伺服器重開後生效"""
+    CFG["secret"] = secrets.token_hex(16)
+    with open(CFG_PATH, "w", encoding="utf-8") as f: json.dump(CFG, f, ensure_ascii=False, indent=2)
 
 async def ws_handler(req):
     if not authed(req): raise web.HTTPForbidden()
@@ -231,6 +247,9 @@ async def ws_handler(req):
                     loop.call_later(1.0, os._exit, 3)
                 except Exception as e:
                     await ws.send_str(json.dumps({"t": "upd", "ok": False, "msg": str(e)[:200]}))
+            elif t == "logoutall":
+                logout_all(); print("🔒 已讓所有裝置登出，重新啟動伺服器")
+                await ws.send_str(json.dumps({"t": "bye"})); loop.call_later(0.5, os._exit, 3)
             elif t == "text": type_text(str(m.get("s", ""))[:2000])
         except Exception as e:
             print("指令錯誤:", e)
@@ -284,7 +303,7 @@ body.typing #hint{display:none!important}
  <div id="more">
   <button data-k="f5">F5 放映</button><button data-k="esc">Esc</button><button data-k="f">全螢幕f</button><button data-k="volmute">🔇</button>
   <button data-k="prev">⏮</button><button data-k="next">⏭</button><button data-k="space">空白</button><button data-k="alt+tab">切換</button>
-  <button data-k="left">◀</button><button data-k="right">▶</button><button id="zm">🔍放大</button><button id="ql">畫質:中</button><button id="out">登出</button><button id="up" style="grid-column:span 4">⟳ 更新到最新版</button>
+  <button data-k="left">◀</button><button data-k="right">▶</button><button id="zm">🔍放大</button><button id="ql">畫質:中</button><button id="out">登出</button><button id="up" style="grid-column:span 2">⟳ 更新到最新版</button><button id="lall" style="grid-column:span 2">🔒 所有裝置登出</button>
  </div>
 </div>
 <div id="kb"><input id="txt" placeholder="直接打字，會即時送到電腦" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send"><button data-k="enter">Enter</button><button data-k="backspace">⌫</button><button id="kbx">完成</button></div>
@@ -363,7 +382,8 @@ $('lb').onclick=()=>setBtn(false); $('rb').onclick=()=>setBtn(!rightNext);   // 
 function ripple(x,y,r){ const d=document.createElement('div'); d.className='tap'+(r?' r':''); d.style.left=x+'px'; d.style.top=y+'px'; document.body.appendChild(d); setTimeout(()=>d.remove(),450); if(navigator.vibrate) navigator.vibrate(15); }
 $('zm').onclick=()=>{ zoom=!zoom; wrap.classList.toggle('zoom',zoom); $('zm').classList.toggle('on',zoom); $('more').classList.remove('show'); };
 $('ql').onclick=()=>{ qi=(qi+1)%3; $('ql').textContent='畫質:'+QL[qi][0]; };
-$('up').onclick=()=>{ $('up').textContent='更新中，約 10 秒…'; send({t:'update'}); };
+$('up').onclick=()=>{ if(!confirm('要從 GitHub 下載最新版並重新啟動嗎？')) return; $('up').textContent='更新中，約 10 秒…'; send({t:'update'}); };
+$('lall').onclick=()=>{ if(!confirm('所有手機（包含這支）都要重新輸入 PIN，確定嗎？')) return; send({t:'logoutall'}); setTimeout(()=>location.href='/',1500); };
 $('out').onclick=()=>{ location.href='/logout'; };
 connect();
 </script></body></html>"""
@@ -411,6 +431,25 @@ $m.Send()
         print("已用 Outlook 寄新網址給自己" if r.returncode == 0 else "Outlook 寄信失敗：" + (r.stderr or "")[:200])
     except Exception as e:
         print("Outlook 寄信失敗：", e)
+
+def notify_login(ua):
+    """有人用 PIN 登入成功就寄信通知（不是你自己的話：關掉黑色視窗、改 PIN）"""
+    to = str(CFG.get("notify_email", "")).strip()
+    ua = re.sub(r"[^0-9A-Za-z ._;:/()-]", "", ua)
+    ps = r"""
+$o = New-Object -ComObject Outlook.Application
+$to = '%s'
+if (-not $to) { $to = $o.Session.Accounts.Item(1).SmtpAddress }
+$m = $o.CreateItem(0); $m.To = $to
+$m.Subject = '手機遙控 有裝置登入'
+$m.Body = "剛剛有裝置用 PIN 登入手機遙控：`r`n時間：%s`r`n裝置：%s`r`n`r`n如果不是你：馬上關掉電腦上的黑色視窗，然後改 phone_remote_config.json 的 PIN。"
+$m.Send()
+""" % (to.replace("'", ""), time.strftime("%Y/%m/%d %H:%M"), ua)
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=60,
+                       creationflags=0x08000000 if IS_WIN else 0)
+    except Exception as e:
+        print("登入通知寄信失敗：", e)
 
 TUNNEL = {"p": None}
 import atexit
@@ -468,6 +507,7 @@ def main():
     print(" 本機測試網址： http://127.0.0.1:%d" % PORT)
     print(" 手機網址：等一下會顯示 https://....trycloudflare.com（也會寄到你的 Outlook）")
     print(" PIN：%s   （要改 PIN：編輯 %s）" % (PIN, CFG_PATH))
+    if len(PIN) < 8: print(" ⚠️ PIN 少於 8 位，建議改成 8 位以上（改完所有手機要重新登入）")
     print("=" * 50)
     threading.Thread(target=tunnel_loop, daemon=True).start()
     if IS_WIN: threading.Thread(target=battery_guard, daemon=True).start()
