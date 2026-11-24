@@ -6,7 +6,7 @@ import asyncio, ctypes, hashlib, hmac, io, json, os, secrets, sys, threading, ti
 from concurrent.futures import ThreadPoolExecutor
 from aiohttp import web
 
-VERSION = "1.14"
+VERSION = "1.15"
 PORT = 8777
 UPDATE_URL = "https://raw.githubusercontent.com/lee09930239-dotcom/phone-remote/HEAD/phone_remote.py"
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
@@ -508,9 +508,22 @@ def do_update():
     m = re.search(rb'VERSION = "([^"]+)"', data)
     return m.group(1).decode() if m else "?"
 
+def keep_fast():
+    """蓋上螢幕時 Windows 會把背景程式降速（1 fps、點擊延遲）→ 關掉這個程式的省電降速，並提高優先順序"""
+    if not IS_WIN: return
+    k = ctypes.windll.kernel32
+    k.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002 | 0x00000040)  # 不睡眠、不關螢幕、Away mode
+    class PPTS(ctypes.Structure):
+        _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG), ("StateMask", wintypes.ULONG)]
+    st = PPTS(1, 0x1 | 0x4, 0)  # EXECUTION_SPEED + IGNORE_TIMER_RESOLUTION 都「不降速」
+    try: k.SetProcessInformation(k.GetCurrentProcess(), 4, ctypes.byref(st), ctypes.sizeof(st))
+    except Exception: pass
+    try: k.SetPriorityClass(k.GetCurrentProcess(), 0x8000)  # ABOVE_NORMAL
+    except Exception: pass
+
 def child_main():
     """網頁伺服器本體（更新時只重開這個，外網通道不動 → 手機網址不變）"""
-    if IS_WIN: ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)
+    keep_fast()
     app = web.Application()
     app.add_routes([web.get("/", index), web.post("/login", login), web.get("/logout", logout), web.get("/manifest.json", manifest), web.get("/ws", ws_handler)])
     for i in range(20):   # 等舊的伺服器放開 port
@@ -521,7 +534,7 @@ def child_main():
 
 def main():
     if "--child" in sys.argv: return child_main()
-    if IS_WIN: ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)
+    keep_fast()
     print("=" * 50)
     print(" 手機遙控 PhoneRemote v%s 已啟動（關掉這個視窗就停止）" % VERSION)
     print(" 本機測試網址： http://127.0.0.1:%d" % PORT)
