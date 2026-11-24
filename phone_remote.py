@@ -6,7 +6,7 @@ import asyncio, ctypes, hashlib, hmac, io, json, os, secrets, sys, threading, ti
 from concurrent.futures import ThreadPoolExecutor
 from aiohttp import web
 
-VERSION = "1.13"
+VERSION = "1.14"
 PORT = 8777
 UPDATE_URL = "https://raw.githubusercontent.com/lee09930239-dotcom/phone-remote/HEAD/phone_remote.py"
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
@@ -274,9 +274,8 @@ html,body{margin:0;height:100%;background:#000;color:#eee;font-family:sans-serif
 #app{position:fixed;left:0;top:0;width:100vw;height:100dvh;display:flex}
 @media (orientation:portrait){#app{width:100dvh;height:100vw;transform:rotate(90deg) translateY(-100%);transform-origin:top left}}
 #wrap{flex:1;min-width:0;height:100%;overflow:hidden;display:flex;align-items:center;justify-content:center}
-#wrap.zoom{overflow:auto;display:block}
 #scr{max-width:100%;max-height:100%;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;display:block}
-#wrap.zoom #scr{max-width:none;max-height:none;width:220%;touch-action:pan-x pan-y}
+#wrap{touch-action:none}#scr{transform-origin:0 0;will-change:transform}
 #bar{width:58px;height:100%;display:flex;flex-direction:column;justify-content:space-evenly;align-items:center;background:#111;padding:4px 0}
 #bar button,#more button{font-size:22px;width:50px;height:44px;border:0;border-radius:10px;background:#2a2a2a;color:#fff;padding:0}
 #more{display:none;position:absolute;right:62px;top:50%;transform:translateY(-50%);background:#1b1b1bee;padding:8px;border-radius:12px;
@@ -303,7 +302,7 @@ body.typing #hint{display:none!important}
  <div id="more">
   <button data-k="f5">F5 放映</button><button data-k="esc">Esc</button><button data-k="f">全螢幕f</button><button data-k="volmute">🔇</button>
   <button data-k="prev">⏮</button><button data-k="next">⏭</button><button data-k="space">空白</button><button data-k="alt+tab">切換</button>
-  <button data-k="left">◀</button><button data-k="right">▶</button><button id="zm">🔍放大</button><button id="ql">畫質:中</button><button id="out">登出</button><button id="up" style="grid-column:span 2">⟳ 更新到最新版</button><button id="lall" style="grid-column:span 2">🔒 所有裝置登出</button>
+  <button data-k="left">◀</button><button data-k="right">▶</button><button id="zm">🔍 還原 1x</button><button id="ql">畫質:中</button><button id="out">登出</button><button id="up" style="grid-column:span 2">⟳ 更新到最新版</button><button id="lall" style="grid-column:span 2">🔒 所有裝置登出</button>
  </div>
 </div>
 <div id="kb"><input id="txt" placeholder="直接打字，會即時送到電腦" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send"><button data-k="enter">Enter</button><button data-k="backspace">⌫</button><button id="kbx">完成</button></div>
@@ -328,24 +327,44 @@ setInterval(()=>{ if(ws&&ws.readyState===1) st.textContent=batTxt+'  '+frames+' 
 function pos(t){const r=img.getBoundingClientRect();
   return rot()?{x:(t.clientY-r.top)/r.height, y:(r.right-t.clientX)/r.width}:{x:(t.clientX-r.left)/r.width, y:(t.clientY-r.top)/r.height};}
 const along=t=>rot()?-t.clientX:t.clientY;   // 畫面上的「上下」方向
-let lastTap=null, s=null, lp=null, drag=false, lastMove=0, scrollY=null;
-img.addEventListener('touchstart',e=>{
-  if(e.touches.length===2){ clearTimeout(lp); s=null; scrollY=(along(e.touches[0])+along(e.touches[1]))/2; if(!zoom) e.preventDefault(); return; }
-  const t=e.touches[0]; s={x:t.clientX,y:t.clientY,p:pos(t),long:false}; drag=false;
-  if(!zoom) e.preventDefault();
+// ---- 觸控：單指＝滑鼠；兩指張合＝放大縮小；放大後兩指拖動＝移動畫面；沒放大時兩指上下＝捲動網頁 ----
+let lastTap=null, s=null, drag=false, lastMove=0, Z={z:1,x:0,y:0}, G=null;
+function local(t){ const r=wrap.getBoundingClientRect();   // 觸控點換算成畫面內（未旋轉）的座標
+  return rot()?{x:t.clientY-r.top, y:r.right-t.clientX}:{x:t.clientX-r.left, y:t.clientY-r.top}; }
+function applyZ(){
+  const w=img.offsetWidth, h=img.offsetHeight;
+  if(Z.z<=1.02){ Z={z:1,x:0,y:0}; }
+  else { Z.x=Math.min(0,Math.max(w-w*Z.z,Z.x)); Z.y=Math.min(0,Math.max(h-h*Z.z,Z.y)); }
+  img.style.transform=Z.z===1?'':`translate(${Z.x}px,${Z.y}px) scale(${Z.z})`;
+  $('zm').textContent=Z.z===1?'🔍 還原 1x':'🔍 還原 1x（目前 '+Z.z.toFixed(1)+'x）';
+}
+function two(e){ const a=local(e.touches[0]), b=local(e.touches[1]);
+  return {d:Math.hypot(a.x-b.x,a.y-b.y), m:{x:(a.x+b.x)/2-img.offsetLeft, y:(a.y+b.y)/2-img.offsetTop}}; }
+wrap.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  if(e.touches.length>=2){ if(drag){ send({t:'up',...pos(e.touches[0])}); drag=false; } s=null;
+    const g=two(e); G={d0:g.d, m0:g.m, z0:Z.z, x0:Z.x, y0:Z.y, mode:null, sy:g.m.y}; return; }
+  if(G) return;
+  const t=e.touches[0]; s={x:t.clientX,y:t.clientY,p:pos(t)}; drag=false;
 },{passive:false});
-img.addEventListener('touchmove',e=>{
-  if(e.touches.length===2 && scrollY!==null && !zoom){ e.preventDefault();
-    const y=(along(e.touches[0])+along(e.touches[1]))/2, dy=y-scrollY;
-    if(Math.abs(dy)>25){ send({t:'scroll',d:dy>0?1:-1}); scrollY=y; } return; }
+wrap.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  if(G && e.touches.length>=2){
+    const g=two(e);
+    if(!G.mode){ if(Math.abs(g.d-G.d0)>18) G.mode='pinch';
+      else if(Math.hypot(g.m.x-G.m0.x,g.m.y-G.m0.y)>12) G.mode=(Z.z>1?'pan':'scroll'); }
+    if(G.mode==='pinch'||G.mode==='pan'){
+      const z=G.mode==='pinch'?Math.min(5,Math.max(1,G.z0*g.d/G.d0)):G.z0, k=z/G.z0;
+      Z.z=z; Z.x=g.m.x-(G.m0.x-G.x0)*k; Z.y=g.m.y-(G.m0.y-G.y0)*k; applyZ();
+    } else if(G.mode==='scroll'){ const dy=g.m.y-G.sy; if(Math.abs(dy)>25){ send({t:'scroll',d:dy>0?1:-1}); G.sy=g.m.y; } }
+    return; }
   if(!s) return; const t=e.touches[0];
-  if(Math.hypot(t.clientX-s.x,t.clientY-s.y)>22){ clearTimeout(lp);
-    if(zoom){ s=null; return; }
-    if(!drag){ drag=true; send({t:'down',...s.p}); } }
-  if(drag){ e.preventDefault(); const n=Date.now(); if(n-lastMove>40){ send({t:'move',...pos(t)}); lastMove=n; } }
+  if(!drag && Math.hypot(t.clientX-s.x,t.clientY-s.y)>22){ drag=true; send({t:'down',...s.p}); }
+  if(drag){ const n=Date.now(); if(n-lastMove>40){ send({t:'move',...pos(t)}); lastMove=n; } }
 },{passive:false});
-img.addEventListener('touchend',e=>{
-  clearTimeout(lp); if(e.touches.length===0) scrollY=null;
+wrap.addEventListener('touchend',e=>{
+  e.preventDefault();
+  if(G){ if(e.touches.length===0) G=null; return; }
   if(!s) return; const ch=e.changedTouches[0];
   if(drag){ send({t:'up',...pos(ch)}); }
   else {
@@ -353,8 +372,9 @@ img.addEventListener('touchend',e=>{
     if(!rightNext && dt<500 && dd<40){ send({t:'dbl',...lastTap.p}); lastTap=null; ripple(s.x,s.y,false); ripple(s.x,s.y,false); }  // 連點兩下＝雙擊（開檔案）
     else { send({t:'click',...s.p,b:rightNext?'right':'left'}); ripple(s.x,s.y,rightNext); lastTap=rightNext?null:{t:now,x:s.x,y:s.y,p:s.p}; if(rightNext) setBtn(false); }
   }
-  s=null; drag=false; if(!zoom) e.preventDefault();
+  s=null; drag=false;
 },{passive:false});
+addEventListener('resize',()=>{ Z={z:1,x:0,y:0}; applyZ(); });
 img.addEventListener('click',e=>{ if(!('ontouchstart' in window)) send({t:'click',...pos(e),b:'left'}); });
 function flash(b){ b.style.background='#2b7cff'; setTimeout(()=>b.style.background='',200); }
 document.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>{ send({t:'key',k:b.dataset.k}); flash(b); });
@@ -380,7 +400,7 @@ txt.addEventListener('blur',()=>setTimeout(()=>{ if(document.activeElement!==txt
 function setBtn(r){ rightNext=r; $('rb').classList.toggle('on',r); $('lb').classList.toggle('on',!r); }
 $('lb').onclick=()=>setBtn(false); $('rb').onclick=()=>setBtn(!rightNext);   // 右鍵：點一次後自動回到左鍵
 function ripple(x,y,r){ const d=document.createElement('div'); d.className='tap'+(r?' r':''); d.style.left=x+'px'; d.style.top=y+'px'; document.body.appendChild(d); setTimeout(()=>d.remove(),450); if(navigator.vibrate) navigator.vibrate(15); }
-$('zm').onclick=()=>{ zoom=!zoom; wrap.classList.toggle('zoom',zoom); $('zm').classList.toggle('on',zoom); $('more').classList.remove('show'); };
+$('zm').onclick=()=>{ Z={z:1,x:0,y:0}; applyZ(); $('more').classList.remove('show'); };
 $('ql').onclick=()=>{ qi=(qi+1)%3; $('ql').textContent='畫質:'+QL[qi][0]; };
 $('up').onclick=()=>{ if(!confirm('要從 GitHub 下載最新版並重新啟動嗎？')) return; $('up').textContent='更新中，約 10 秒…'; send({t:'update'}); };
 $('lall').onclick=()=>{ if(!confirm('所有手機（包含這支）都要重新輸入 PIN，確定嗎？')) return; send({t:'logoutall'}); setTimeout(()=>location.href='/',1500); };
