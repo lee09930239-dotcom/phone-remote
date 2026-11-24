@@ -512,7 +512,8 @@ def keep_fast():
     """蓋上螢幕時 Windows 會把背景程式降速（1 fps、點擊延遲）→ 關掉這個程式的省電降速，並提高優先順序"""
     if not IS_WIN: return
     k = ctypes.windll.kernel32
-    k.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002 | 0x00000040)  # 不睡眠、不關螢幕、Away mode
+    if not k.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002 | 0x00000040):  # 不睡眠、不關螢幕、Away mode
+        k.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)  # 不支援 Away mode 就用一般的
     class PPTS(ctypes.Structure):
         _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG), ("StateMask", wintypes.ULONG)]
     st = PPTS(1, 0x1 | 0x4, 0)  # EXECUTION_SPEED + IGNORE_TIMER_RESOLUTION 都「不降速」
